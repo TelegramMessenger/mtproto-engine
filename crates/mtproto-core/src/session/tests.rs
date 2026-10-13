@@ -795,6 +795,85 @@ fn msgs_ack_on_container_acknowledges_children_once() {
 }
 
 #[test]
+fn trace_names_every_msg_id_a_query_went_under_and_its_answer() {
+    let mut h = Harness::new();
+    h.session.send(QueryId(1), query_body(1), QueryOptions::default(), h.now);
+    let packet = h.flush().unwrap();
+    let first = h.sent_query(&packet, 1);
+    let first_seq = packet.queries()[0].seq_no;
+    let container = packet.messages[0].container_id.unwrap_or(0);
+    assert_eq!(
+        Vec::from(h.session.take_trace()),
+        vec![QueryTrace::Sent {
+            id: QueryId(1),
+            msg_id: first,
+            seq_no: first_seq,
+            container_id: container,
+            previous_msg_id: 0,
+            again: false,
+        }]
+    );
+
+    h.deliver(vec![Outgoing::Service(bad_server_salt(packet.header.msg_id, packet.header.seq_no, 555))]).unwrap();
+    let packet = h.flush().unwrap();
+    let second = h.sent_query(&packet, 1);
+    assert!(second > first);
+    let trace = Vec::from(h.session.take_trace());
+    assert!(matches!(
+        trace.as_slice(),
+        [QueryTrace::Sent { id: QueryId(1), msg_id, previous_msg_id, again: false, .. }]
+            if *msg_id == second && *previous_msg_id == first
+    ));
+
+    h.session.connection_closed();
+    h.advance(1.0);
+    h.session.connection_opened(h.now);
+    let packet = h.flush().unwrap();
+    assert_eq!(h.sent_query(&packet, 1), second);
+    let trace = Vec::from(h.session.take_trace());
+    assert!(matches!(
+        trace.as_slice(),
+        [QueryTrace::Sent { id: QueryId(1), msg_id, previous_msg_id: 0, again: true, .. }]
+            if *msg_id == second
+    ));
+
+    h.deliver(vec![Outgoing::Content(rpc_error(second, 500, "NEED_OWNER_EMPTY"))]).unwrap();
+    let trace = Vec::from(h.session.take_trace());
+    assert!(matches!(
+        trace.as_slice(),
+        [QueryTrace::Answered { id: QueryId(1), msg_id, response_msg_id, error: Some((500, message)) }]
+            if *msg_id == second && *response_msg_id != 0 && message == "NEED_OWNER_EMPTY"
+    ));
+
+    h.session.send(QueryId(2), query_body(2), QueryOptions::default(), h.now);
+    let packet = h.flush().unwrap();
+    let third = h.sent_query(&packet, 2);
+    h.session.take_trace();
+    h.deliver(vec![Outgoing::Content(rpc_result(third, &[1, 2, 3, 4]))]).unwrap();
+    assert!(matches!(
+        Vec::from(h.session.take_trace()).as_slice(),
+        [QueryTrace::Answered { id: QueryId(2), msg_id, error: None, .. }] if *msg_id == third
+    ));
+}
+
+#[test]
+fn trace_keeps_only_the_latest_entries() {
+    let mut h = Harness::new();
+    for index in 0..MAX_QUERY_TRACE + 10 {
+        h.session.push_trace(QueryTrace::Answered {
+            id: QueryId(index as u64),
+            msg_id: 0,
+            response_msg_id: 0,
+            error: None,
+        });
+    }
+    let trace = h.session.take_trace();
+    assert_eq!(trace.len(), MAX_QUERY_TRACE);
+    assert!(matches!(trace.front(), Some(QueryTrace::Answered { id: QueryId(10), .. })));
+    assert!(h.session.take_trace().is_empty());
+}
+
+#[test]
 fn gzip_rpc_errors_and_duplicates() {
     let mut h = Harness::new();
     h.session.send(QueryId(1), query_body(1), QueryOptions::default(), h.now);

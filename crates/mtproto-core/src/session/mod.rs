@@ -115,6 +115,7 @@ pub const HTTP_ANSWER_REQUEST_BYTES: usize = 16 * 1024;
 /// HTTP: packets tracked for loss; beyond it the oldest are forgotten (their queries then wait for
 /// the usual state requests).
 pub const MAX_TRACKED_HTTP_PACKETS: usize = 256;
+pub const MAX_QUERY_TRACE: usize = 256;
 /// HTTP: a response proves the server read the request, and it acknowledges the queries in it in
 /// that response or soon after; one neither acknowledged nor answered this long after goes again.
 pub const HTTP_ACK_GRACE: f64 = 3.0;
@@ -174,6 +175,15 @@ pub enum SessionEvent {
     DroppedAnswerTooLarge { total: usize },
     DestroyAuthKey { outcome: DestroyAuthKeyOutcome },
     Released { id: QueryId, may_have_run: bool },
+}
+
+/// What happened to a query on the wire, for the host's log: the server knows a request only by its
+/// msg_id. A `Sent` with `again` repeats the same msg_id; otherwise `previous_msg_id` is the one it
+/// replaces, 0 on the first send. `container_id` is 0 when the message went alone.
+#[derive(Debug, Clone, PartialEq)]
+pub enum QueryTrace {
+    Sent { id: QueryId, msg_id: i64, seq_no: i32, container_id: i64, previous_msg_id: i64, again: bool },
+    Answered { id: QueryId, msg_id: i64, response_msg_id: i64, error: Option<(i32, String)> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -305,6 +315,8 @@ struct Query {
     options: QueryOptions,
     state: QueryState,
     msg_id: i64,
+    /// The msg_id the query last went under before it went back to the queue, for the trace.
+    previous_msg_id: i64,
     seq_no: i32,
     container_id: i64,
     invoke_after_msg_id: i64,
@@ -531,6 +543,7 @@ pub struct Session {
     handover: bool,
 
     events: VecDeque<SessionEvent>,
+    trace: VecDeque<QueryTrace>,
 }
 
 impl Session {
@@ -637,6 +650,7 @@ impl Session {
             bind_gate: false,
             handover: false,
             events: VecDeque::new(),
+            trace: VecDeque::new(),
         }
     }
 
@@ -1379,6 +1393,7 @@ impl Session {
                 options,
                 state: QueryState::Pending,
                 msg_id: 0,
+                previous_msg_id: 0,
                 seq_no: 0,
                 container_id: 0,
                 invoke_after_msg_id: 0,
@@ -1618,6 +1633,7 @@ impl Session {
             Some(QueryState::Pending),
         );
         query.state = QueryState::Pending;
+        query.previous_msg_id = query.msg_id;
         query.msg_id = 0;
         query.container_id = 0;
         query.invoke_after_msg_id = 0;
@@ -2536,6 +2552,11 @@ impl Session {
                 }
             }
         };
+        let error = match &event {
+            SessionEvent::Error { code, message, .. } => Some((*code, message.clone())),
+            _ => None,
+        };
+        self.push_trace(QueryTrace::Answered { id, msg_id: req_msg_id, response_msg_id: msg_id, error });
         self.complete_query(id, req_msg_id);
         self.events.push_back(event);
     }
@@ -3183,6 +3204,7 @@ impl Session {
                 options: QueryOptions::default(),
                 state: QueryState::Pending,
                 msg_id: 0,
+                previous_msg_id: 0,
                 seq_no: 0,
                 container_id: 0,
                 invoke_after_msg_id: 0,
@@ -3317,6 +3339,7 @@ impl Session {
 
         let mut messages: Vec<OutgoingMessage> = Vec::new();
         let mut query_messages: Vec<(QueryId, usize)> = Vec::new();
+        let mut sent_trace: Vec<(i32, i64, bool)> = Vec::new();
         let mut wants_quick_ack = false;
         let mut force_container = false;
         self.packet_seq += 1;
@@ -3360,6 +3383,7 @@ impl Session {
                 total += body.len();
                 wants_quick_ack |= query.options.quick_ack;
                 query_messages.push((id, messages.len()));
+                sent_trace.push((query.seq_no, query.msg_id, true));
                 messages.push(OutgoingMessage { msg_id: query.msg_id, seq_no: query.seq_no, body });
                 force_container = true;
             }
@@ -3422,6 +3446,7 @@ impl Session {
                     Some(QueryState::Sent),
                 );
                 query.state = QueryState::Sent;
+                sent_trace.push((seq_no, query.previous_msg_id, false));
                 query.msg_id = msg_id;
                 query.seq_no = seq_no;
                 query.sent_at = now.mono;
@@ -3635,6 +3660,17 @@ impl Session {
         };
         self.remember_sent(outer_msg_id, now);
 
+        for ((id, index), (seq_no, previous_msg_id, again)) in query_messages.iter().zip(sent_trace) {
+            self.push_trace(QueryTrace::Sent {
+                id: *id,
+                msg_id: message_ids[*index],
+                seq_no,
+                container_id,
+                previous_msg_id: if again { 0 } else { previous_msg_id },
+                again,
+            });
+        }
+
         if container_id != 0 {
             let children: Vec<i64> = query_messages.iter().map(|(_, index)| messages[*index].msg_id).collect();
             let mut moved = Vec::new();
@@ -3760,6 +3796,19 @@ impl Session {
 
     pub fn drain_events(&mut self) -> Vec<SessionEvent> {
         self.events.drain(..).collect()
+    }
+
+    /// The wire history of queries since the last call, oldest first; only the latest
+    /// `MAX_QUERY_TRACE` entries are kept.
+    pub fn take_trace(&mut self) -> VecDeque<QueryTrace> {
+        std::mem::take(&mut self.trace)
+    }
+
+    fn push_trace(&mut self, entry: QueryTrace) {
+        if self.trace.len() >= MAX_QUERY_TRACE {
+            self.trace.pop_front();
+        }
+        self.trace.push_back(entry);
     }
 
     pub fn shrink(&mut self) {

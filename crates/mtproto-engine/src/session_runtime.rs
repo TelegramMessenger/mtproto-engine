@@ -10,7 +10,9 @@ use mtproto_core::msg_id::msg_id_for_time;
 use mtproto_core::rpc::{
     ApiEnvironment, PendingRequest, RequestId, RpcClient, RpcEvent, RpcRequest, SessionRole, Verification,
 };
-use mtproto_core::session::{Now, SEND_QUEUE_STUCK_AFTER, ServerSalt, Session, SessionConfig, SessionError};
+use mtproto_core::session::{
+    Now, QueryTrace, SEND_QUEUE_STUCK_AFTER, ServerSalt, Session, SessionConfig, SessionError,
+};
 use mtproto_core::tl::mtproto::ReqPqMulti;
 use mtproto_core::tl::{TlWrite, Writer, ids};
 use mtproto_core::transport::{
@@ -2159,7 +2161,37 @@ impl SessionRuntime {
         }
     }
 
+    fn log_query_trace(&mut self, callbacks: &Arc<dyn EngineCallbacks>) {
+        let Some(rpc) = &mut self.rpc else {
+            return;
+        };
+        let trace = rpc.session_mut().take_trace();
+        for entry in trace {
+            let line = match entry {
+                QueryTrace::Sent { id, msg_id, seq_no, container_id, previous_msg_id, again } => {
+                    let container = if container_id != 0 { format!(" in {container_id:#x}") } else { String::new() };
+                    let history = if again {
+                        " again".to_string()
+                    } else if previous_msg_id != 0 {
+                        format!(" (was {previous_msg_id:#x})")
+                    } else {
+                        String::new()
+                    };
+                    format!("msg #{} msg_id={msg_id:#x} seq={seq_no}{container}{history}", id.0)
+                }
+                QueryTrace::Answered { id, msg_id, response_msg_id, error: Some((code, message)) } => {
+                    format!("#{} msg_id={msg_id:#x} -> {code} {message} (answer {response_msg_id:#x})", id.0)
+                }
+                QueryTrace::Answered { id, msg_id, response_msg_id, error: None } => {
+                    format!("#{} msg_id={msg_id:#x} -> result (answer {response_msg_id:#x})", id.0)
+                }
+            };
+            self.log(callbacks, LogLevel::Info, &line);
+        }
+    }
+
     fn pump_rpc_events(&mut self, now: Now, registry: &Registry, callbacks: &Arc<dyn EngineCallbacks>) {
+        self.log_query_trace(callbacks);
         let mut reset_connection = false;
         let mut events = std::mem::take(&mut self.undelivered);
         events.extend(self.rpc.as_mut().map(RpcClient::drain_events).unwrap_or_default());
