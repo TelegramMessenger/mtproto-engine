@@ -310,14 +310,18 @@ impl Worker {
                 }
                 Command::Destroy(handle) => {
                     if let Some(mut session) = self.sessions.remove(&handle) {
-                        session.shutdown(self.poll.registry(), now);
                         self.tokens.remove(&session.token());
-                        self.callbacks.on_event(handle, EngineEvent::Closed);
+                        if session.shutdown(self.poll.registry(), now) {
+                            self.callbacks.on_event(handle, EngineEvent::Closed);
+                        }
                     }
                 }
                 Command::Send(handle, request) => {
                     if let Some(session) = self.sessions.get_mut(&handle) {
                         session.send(request, now);
+                        if session.is_draining() {
+                            session.pump_rpc_events(now, self.poll.registry(), &self.callbacks);
+                        }
                     } else {
                         self.callbacks.on_event(
                             handle,
@@ -470,5 +474,62 @@ impl Worker {
             }
         }
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+    use std::sync::mpsc::channel;
+
+    use mtproto_core::rpc::{RpcEvent, SessionRole};
+
+    use super::*;
+
+    #[derive(Default)]
+    struct Recorder(Mutex<Vec<EngineEvent>>);
+
+    impl EngineCallbacks for Recorder {
+        fn on_event(&self, _: SessionHandle, event: EngineEvent) {
+            self.0.lock().unwrap().push(event);
+        }
+    }
+
+    #[test]
+    fn send_then_destroy_in_one_turn_preserves_release_and_single_close() {
+        let poll = Poll::new().unwrap();
+        let waker = Arc::new(Waker::new(poll.registry(), WAKER_TOKEN).unwrap());
+        let (sender, receiver) = channel();
+        let callbacks = Arc::new(Recorder::default());
+        let mut worker = Worker::new(
+            poll,
+            receiver,
+            sender.clone(),
+            waker,
+            Arc::default(),
+            callbacks.clone(),
+            EngineConfig::default(),
+        );
+        let handle = SessionHandle(1);
+        let setup = SessionSetup::new(2, SessionRole::Main, vec![]);
+        let id = RequestId(7);
+        let request =
+            RpcRequest { id, body: 1u32.to_le_bytes().to_vec(), flags: Default::default(), invoke_after: None };
+        for command in [
+            Command::Create { handle, setup: Box::new(setup) },
+            Command::Drain(handle, 0.0),
+            Command::Send(handle, request),
+            Command::Destroy(handle),
+        ] {
+            sender.send(command).unwrap();
+        }
+        assert!(worker.drain_commands(clock::now()));
+        assert_eq!(
+            *callbacks.0.lock().unwrap(),
+            vec![
+                EngineEvent::Closed,
+                EngineEvent::Rpc(RpcEvent::Released { id, may_have_run: false, retry_after: 0.0 })
+            ],
+        );
     }
 }

@@ -973,10 +973,14 @@ impl SessionRuntime {
         }
     }
 
-    pub fn shutdown(&mut self, registry: &Registry, now: Now) {
+    pub fn shutdown(&mut self, registry: &Registry, now: Now) -> bool {
+        if self.closed {
+            return false;
+        }
         self.closed = true;
         self.cancel_http_probe(registry);
         self.close_connection(registry, now, false);
+        true
     }
 
     fn address_key(&self, index: usize) -> Option<(String, u16)> {
@@ -2190,7 +2194,7 @@ impl SessionRuntime {
         }
     }
 
-    fn pump_rpc_events(&mut self, now: Now, registry: &Registry, callbacks: &Arc<dyn EngineCallbacks>) {
+    pub(crate) fn pump_rpc_events(&mut self, now: Now, registry: &Registry, callbacks: &Arc<dyn EngineCallbacks>) {
         self.log_query_trace(callbacks);
         let mut reset_connection = false;
         let mut events = std::mem::take(&mut self.undelivered);

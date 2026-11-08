@@ -183,7 +183,7 @@ pub enum SessionRole {
 struct RequestState {
     request: RpcRequest,
     seq: u64,
-    wrapped_with_init: bool,
+    init_generation: Option<u64>,
     in_session: bool,
     not_before: f64,
     server_errors: u32,
@@ -209,7 +209,7 @@ impl RequestState {
         Self {
             request,
             seq,
-            wrapped_with_init: false,
+            init_generation: None,
             in_session: false,
             not_before: 0.0,
             server_errors: 0,
@@ -321,6 +321,7 @@ pub struct RpcClient {
     role: SessionRole,
     environment: Option<ApiEnvironment>,
     stored_init_hash: Option<String>,
+    init_generation: u64,
     requests: HashMap<RequestId, RequestState>,
     order: BTreeMap<u64, RequestId>,
     parked: BTreeMap<u64, RequestId>,
@@ -346,6 +347,7 @@ impl RpcClient {
             role,
             environment,
             stored_init_hash,
+            init_generation: 0,
             requests: HashMap::new(),
             order: BTreeMap::new(),
             parked: BTreeMap::new(),
@@ -402,6 +404,7 @@ impl RpcClient {
     /// auth.bindTempAuthKey), calls handed to the session but not sent yet were wrapped without
     /// initConnection: they are taken back and wrapped again, so the first call to go carries it.
     pub fn set_stored_init_hash(&mut self, hash: Option<String>) {
+        self.advance_init_generation();
         self.stored_init_hash = hash;
         if !self.needs_initialization() {
             return;
@@ -410,7 +413,9 @@ impl RpcClient {
             .requests
             .iter()
             .filter(|(id, state)| {
-                state.in_session && !state.wrapped_with_init && !self.session.was_transmitted(QueryId::from(**id))
+                state.in_session
+                    && state.init_generation.is_none()
+                    && !self.session.was_transmitted(QueryId::from(**id))
             })
             .map(|(id, _)| *id)
             .collect();
@@ -428,8 +433,11 @@ impl RpcClient {
         let changed =
             self.environment.as_ref().map(|current| current.init_hash.as_str()) != Some(environment.init_hash.as_str());
         self.environment = Some(environment);
-        if changed && let Some(noop) = noop_request {
-            self.send(noop, now);
+        if changed {
+            self.init_generation = self.init_generation.wrapping_add(1);
+            if let Some(noop) = noop_request {
+                self.send(noop, now);
+            }
         }
     }
 
@@ -499,7 +507,7 @@ impl RpcClient {
         state.seq = self.next_seq;
         self.next_seq += 1;
         state.in_session = false;
-        state.wrapped_with_init = false;
+        state.init_generation = None;
         self.order.insert(state.seq, id);
         self.parked.insert(state.seq, id);
         self.requests.insert(id, state);
@@ -601,7 +609,23 @@ impl RpcClient {
         self.session.destroy_auth_key(now);
     }
 
+    fn advance_init_generation(&mut self) {
+        let previous = self.init_generation;
+        self.init_generation = previous.wrapping_add(1);
+        for (&id, state) in &mut self.requests {
+            let query = QueryId::from(id);
+            if state.in_session
+                && state.init_generation == Some(previous)
+                && self.session.contains(query)
+                && !self.session.was_transmitted(query)
+            {
+                state.init_generation = Some(self.init_generation);
+            }
+        }
+    }
+
     pub fn invalidate_initialization(&mut self) {
+        self.advance_init_generation();
         if self.stored_init_hash.take().is_some() {
             self.events.push_back(RpcEvent::InitHashCleared);
         }
@@ -679,7 +703,7 @@ impl RpcClient {
                 without_updates,
                 state.verification.as_ref(),
             );
-            state.wrapped_with_init = initialize;
+            state.init_generation = initialize.then_some(self.init_generation);
             state.in_session = true;
             state.rejected_key = None;
             state.sent_at_unix = now.unix;
@@ -762,7 +786,7 @@ impl RpcClient {
             SessionEvent::Result { id, body, response_msg_id, .. } => {
                 let id = RequestId::from(id);
                 if let Some(state) = self.finish(id) {
-                    if state.wrapped_with_init
+                    if state.init_generation == Some(self.init_generation)
                         && let Some(environment) = &self.environment
                         && self.stored_init_hash.as_deref() != Some(environment.init_hash.as_str())
                     {

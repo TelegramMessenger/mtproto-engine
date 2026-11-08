@@ -140,6 +140,9 @@ impl HostStreams {
 
     pub(crate) fn opened(&self, stream: StreamId) {
         self.update(stream, |state| {
+            if state.connected || state.ended.is_some() {
+                return false;
+            }
             state.connected = true;
             true
         });
@@ -409,6 +412,21 @@ mod tests {
         }
         assert_eq!(pipe.read(&mut buffer).unwrap_err().kind(), ErrorKind::WouldBlock);
         assert_eq!(host.resumed.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_late_open_cannot_revive_a_failed_stream() {
+        let poll = mio::Poll::new().unwrap();
+        let streams = Arc::new(HostStreams::default());
+        streams.set_host(Some(Arc::new(RecordingHost::default())));
+        let signal = signal(&poll);
+        let pipe = open(&streams, &signal);
+        streams.closed(pipe.id, Some("opening failed".into()));
+        assert_eq!(signal.take(), vec![Token(7)]);
+
+        streams.opened(pipe.id);
+        assert_eq!(pipe.is_connected().unwrap_err().kind(), ErrorKind::ConnectionRefused);
+        assert!(signal.take().is_empty());
     }
 
     #[test]
