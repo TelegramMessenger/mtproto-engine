@@ -58,7 +58,7 @@ impl SessionRuntime {
         self.drive_drain(now, registry, callbacks);
     }
 
-    pub(super) fn is_draining(&self) -> bool {
+    pub(crate) fn is_draining(&self) -> bool {
         self.drain.is_some()
     }
 
@@ -124,10 +124,9 @@ impl SessionRuntime {
         let queued: Vec<_> = self.queued.drain(..).collect();
         self.release_retired(queued, now);
         self.pump_rpc_events(now, registry, callbacks);
-        self.closed = true;
-        self.cancel_http_probe(registry);
-        self.close_connection(registry, now, false);
-        callbacks.on_event(self.handle, EngineEvent::Closed);
+        if self.shutdown(registry, now) {
+            callbacks.on_event(self.handle, EngineEvent::Closed);
+        }
     }
 
     pub(super) fn drain_deadline(&self) -> Option<f64> {
