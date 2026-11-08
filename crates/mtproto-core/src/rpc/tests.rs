@@ -260,6 +260,36 @@ fn an_old_init_result_cannot_undo_invalidation() {
 }
 
 #[test]
+fn a_result_already_queued_for_delivery_does_not_acknowledge_invalidated_initialization() {
+    let mut h = Harness::new(SessionRole::Main, None);
+    h.send(1, RequestFlags::default());
+    h.send(2, RequestFlags::default());
+    let calls = h.flush_calls();
+    assert_eq!(calls.len(), 2);
+    h.reply(vec![
+        Outgoing::Content(rpc_error(calls[0].0, 400, "CONNECTION_NOT_INITED")),
+        Outgoing::Content(rpc_result(calls[1].0, &[1, 0, 0, 0])),
+    ]);
+    assert!(h.events().iter().any(|event| matches!(event, RpcEvent::Completed { id: RequestId(2), .. })));
+    assert_eq!(h.client.stored_init_hash(), None);
+}
+
+#[test]
+fn an_unsent_init_wrapper_still_counts_after_binding_resets_the_hash() {
+    let mut h = Harness::new(SessionRole::Main, None);
+    h.send(1, RequestFlags::default());
+    assert!(!h.client.session().was_transmitted(QueryId(1)));
+    h.client.set_stored_init_hash(None);
+    let first = h.flush_calls();
+    assert_eq!(first[0].1, vec![ids::INVOKE_WITH_LAYER, INIT_CONNECTION]);
+    h.reply(vec![Outgoing::Content(rpc_result(first[0].0, &[1, 0, 0, 0]))]);
+    assert_eq!(h.client.stored_init_hash(), Some("h1"));
+
+    h.send(2, RequestFlags::default());
+    assert!(h.flush_calls()[0].1.is_empty());
+}
+
+#[test]
 fn connection_not_inited_clears_hash_and_retries_wrapped() {
     let mut h = Harness::new(SessionRole::Main, Some("h1"));
     h.send(1, RequestFlags::default());

@@ -404,7 +404,7 @@ impl RpcClient {
     /// auth.bindTempAuthKey), calls handed to the session but not sent yet were wrapped without
     /// initConnection: they are taken back and wrapped again, so the first call to go carries it.
     pub fn set_stored_init_hash(&mut self, hash: Option<String>) {
-        self.init_generation = self.init_generation.wrapping_add(1);
+        self.advance_init_generation();
         self.stored_init_hash = hash;
         if !self.needs_initialization() {
             return;
@@ -609,8 +609,23 @@ impl RpcClient {
         self.session.destroy_auth_key(now);
     }
 
+    fn advance_init_generation(&mut self) {
+        let previous = self.init_generation;
+        self.init_generation = previous.wrapping_add(1);
+        for (&id, state) in &mut self.requests {
+            let query = QueryId::from(id);
+            if state.in_session
+                && state.init_generation == Some(previous)
+                && self.session.contains(query)
+                && !self.session.was_transmitted(query)
+            {
+                state.init_generation = Some(self.init_generation);
+            }
+        }
+    }
+
     pub fn invalidate_initialization(&mut self) {
-        self.init_generation = self.init_generation.wrapping_add(1);
+        self.advance_init_generation();
         if self.stored_init_hash.take().is_some() {
             self.events.push_back(RpcEvent::InitHashCleared);
         }
