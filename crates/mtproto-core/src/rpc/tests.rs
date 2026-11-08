@@ -229,6 +229,37 @@ fn stored_hash_skips_initialization_and_change_reinitializes() {
 }
 
 #[test]
+fn old_init_result_does_not_acknowledge_a_new_environment() {
+    let mut h = Harness::new(SessionRole::Main, None);
+    h.send(1, RequestFlags::default());
+    let old = h.flush_calls()[0].0;
+    h.client.update_environment(environment("h2"), None, h.now);
+    h.reply(vec![Outgoing::Content(rpc_result(old, &[1, 0, 0, 0]))]);
+    let events = h.events();
+    assert!(events.iter().any(|event| matches!(event, RpcEvent::Completed { id: RequestId(1), .. })));
+    assert_eq!(h.client.stored_init_hash(), None);
+    assert!(!events.iter().any(|event| matches!(event, RpcEvent::InitHashStored { .. })));
+
+    h.send(2, RequestFlags::default());
+    let next = h.flush_calls();
+    assert_eq!(next[0].1, vec![ids::INVOKE_WITH_LAYER, INIT_CONNECTION]);
+    h.reply(vec![Outgoing::Content(rpc_result(next[0].0, &[1, 0, 0, 0]))]);
+    assert!(h.events().contains(&RpcEvent::InitHashStored { hash: "h2".into() }));
+}
+
+#[test]
+fn an_old_init_result_cannot_undo_invalidation() {
+    let mut h = Harness::new(SessionRole::Main, None);
+    h.send(1, RequestFlags::default());
+    let old = h.flush_calls()[0].0;
+    h.client.invalidate_initialization();
+    h.reply(vec![Outgoing::Content(rpc_result(old, &[1, 0, 0, 0]))]);
+    assert_eq!(h.client.stored_init_hash(), None);
+    h.send(2, RequestFlags::default());
+    assert_eq!(h.flush_calls()[0].1, vec![ids::INVOKE_WITH_LAYER, INIT_CONNECTION]);
+}
+
+#[test]
 fn connection_not_inited_clears_hash_and_retries_wrapped() {
     let mut h = Harness::new(SessionRole::Main, Some("h1"));
     h.send(1, RequestFlags::default());
