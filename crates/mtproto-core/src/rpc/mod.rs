@@ -98,6 +98,12 @@ pub enum RpcEvent {
         body: Vec<u8>,
         response_time: f64,
         duration: f64,
+        /// The msg_ids the request went out under, over every session of this client and those it was
+        /// carried from (`adopt`); a retransmit under the same msg_id is not counted.
+        transmissions: u32,
+        /// The answered message carried `invokeAfterMsg` (the request has `invoke_after` and its
+        /// dependency was in the session when it went).
+        chained: bool,
     },
     Failed {
         id: RequestId,
@@ -202,6 +208,8 @@ struct RequestState {
     /// client, or one taken back from this session (an initConnection re-wrap). Only a handover reads
     /// it; a later error answer does not clear it.
     reached_server: bool,
+    /// The msg_ids it went out under before it last left a session (`Session::take_sends`).
+    sends: u32,
 }
 
 impl RequestState {
@@ -218,6 +226,7 @@ impl RequestState {
             waiting_for_dependency: None,
             verification: None,
             pending_verification: false,
+            sends: 0,
             sent_at_unix: now.unix,
             flood_wait_seconds: 0,
             flood_wait_text: None,
@@ -729,7 +738,8 @@ impl RpcClient {
     }
 
     fn remove_request(&mut self, id: RequestId) -> Option<RequestState> {
-        let state = self.requests.remove(&id)?;
+        let mut state = self.requests.remove(&id)?;
+        state.sends += self.session.take_sends(id.into());
         self.order.remove(&state.seq);
         self.parked.remove(&state.seq);
         if state.in_session && state.request.flags.timeout_timer {
@@ -783,7 +793,7 @@ impl RpcClient {
                 self.session.finish_bind(id, false, now);
                 self.events.push_back(RpcEvent::TemporaryKeyBindFailed { code, message });
             }
-            SessionEvent::Result { id, body, response_msg_id, .. } => {
+            SessionEvent::Result { id, body, response_msg_id, chained, .. } => {
                 let id = RequestId::from(id);
                 if let Some(state) = self.finish(id) {
                     if state.init_generation == Some(self.init_generation)
@@ -798,6 +808,8 @@ impl RpcClient {
                         body,
                         response_time: msg_id_time(response_msg_id),
                         duration: (now.unix - state.sent_at_unix).max(0.0),
+                        transmissions: state.sends,
+                        chained,
                     });
                 }
             }
@@ -1161,6 +1173,7 @@ impl RpcClient {
         for id in order.into_values() {
             if let Some(mut state) = self.requests.remove(&id) {
                 state.reached_server |= state.in_session && self.session.may_have_run(QueryId::from(id));
+                state.sends += self.session.take_sends(QueryId::from(id));
                 pending.push(PendingRequest(state));
             }
         }

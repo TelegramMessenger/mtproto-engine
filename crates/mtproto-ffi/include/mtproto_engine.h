@@ -217,6 +217,14 @@ enum {
     MTReleasedMayHaveRun = 1 << 0,
 };
 
+/* MTEventKindCompleted's flags: MTCompletedSentAgain when the request went out under more than one
+   msg_id (a retransmit under the same msg_id is one), MTCompletedChained when the answered message
+   carried invokeAfterMsg. */
+enum {
+    MTCompletedSentAgain = 1 << 0,
+    MTCompletedChained = 1 << 1,
+};
+
 enum {
     MTConnectionStateNetworkAvailable = 1 << 0,
     MTConnectionStateConnected = 1 << 1,

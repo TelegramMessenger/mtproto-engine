@@ -1374,6 +1374,148 @@ fn a_call_whose_announced_answer_never_comes_fails_instead_of_running_again() {
     }
 }
 
+/// What a completed call reports about how it went out (M8b's E-1): the message ids it went out under
+/// (a retransmit under the same msg_id is one) and whether the answered send carried `invokeAfterMsg`.
+mod transmissions {
+    use super::*;
+
+    fn completed(events: &[RpcEvent], id: u64) -> (u32, bool) {
+        events
+            .iter()
+            .find_map(|event| match event {
+                RpcEvent::Completed { id: done, transmissions, chained, .. } if done.0 == id => {
+                    Some((*transmissions, *chained))
+                }
+                _ => None,
+            })
+            .expect("completed")
+    }
+
+    fn chained(id: u64, after: u64) -> RpcRequest {
+        RpcRequest {
+            id: RequestId(id),
+            body: call(id as u32),
+            flags: RequestFlags::default(),
+            invoke_after: Some(RequestId(after)),
+        }
+    }
+
+    #[test]
+    fn completed_reports_one_transmission() {
+        let mut h = Harness::new(SessionRole::Main, Some("h1"));
+        h.send(1, RequestFlags::default());
+        let calls = h.flush_calls();
+        h.reply(vec![Outgoing::Content(rpc_result(calls[0].0, &[0; 4]))]);
+        assert_eq!(completed(&h.events(), 1), (1, false));
+    }
+
+    #[test]
+    fn bad_server_salt_resend_reports_two() {
+        let mut h = Harness::new(SessionRole::Main, Some("h1"));
+        h.send(1, RequestFlags::default());
+        let first = h.flush_calls()[0].0;
+        h.reply(vec![Outgoing::Service(bad_server_salt(first, 1, 6))]);
+        h.server.salt = 6;
+        let second = h.flush_calls();
+        assert_eq!(second.len(), 1);
+        assert_ne!(second[0].0, first, "goes again under a new msg_id");
+        h.reply(vec![Outgoing::Content(rpc_result(second[0].0, &[0; 4]))]);
+        assert_eq!(completed(&h.events(), 1), (2, false));
+    }
+
+    #[test]
+    fn a_flood_waited_request_reports_two() {
+        let mut h = Harness::new(SessionRole::Main, Some("h1"));
+        h.send(1, RequestFlags::default());
+        let first = h.flush_calls()[0].0;
+        h.reply(vec![Outgoing::Content(rpc_error(first, 420, "FLOOD_WAIT_1"))]);
+        h.advance(1.1);
+        let second = h.flush_calls();
+        assert_eq!(second.len(), 1);
+        h.reply(vec![Outgoing::Content(rpc_result(second[0].0, &[0; 4]))]);
+        assert_eq!(completed(&h.events(), 1), (2, false));
+    }
+
+    #[test]
+    fn same_msg_id_retransmit_reports_one() {
+        let mut h = Harness::new(SessionRole::Main, Some("h1"));
+        h.send(1, RequestFlags::default());
+        let first = h.flush_calls()[0].0;
+        h.client.connection_closed(h.now);
+        h.advance(0.5);
+        h.client.connection_opened(h.now);
+        let again = h.flush_calls();
+        assert_eq!(again.len(), 1);
+        assert_eq!(again[0].0, first, "the same msg_id again");
+        h.reply(vec![Outgoing::Content(rpc_result(first, &[0; 4]))]);
+        assert_eq!(completed(&h.events(), 1), (1, false));
+    }
+
+    #[test]
+    fn dependent_in_session_reports_chained() {
+        let mut h = Harness::new(SessionRole::Main, Some("h1"));
+        h.send(1, RequestFlags::default());
+        h.client.send(chained(2, 1), h.now);
+        let calls = h.flush_calls();
+        let first = calls.iter().find(|c| c.2 == 1).unwrap().0;
+        let dependent = calls.iter().find(|c| c.2 == 2).unwrap();
+        assert_eq!(dependent.1, vec![ids::INVOKE_AFTER_MSG]);
+        h.reply(vec![
+            Outgoing::Content(rpc_result(first, &[0; 4])),
+            Outgoing::Content(rpc_result(dependent.0, &[0; 4])),
+        ]);
+        let events = h.events();
+        assert_eq!(completed(&events, 1), (1, false));
+        assert_eq!(completed(&events, 2), (1, true));
+    }
+
+    #[test]
+    fn dependent_of_parked_request_reports_unchained() {
+        let mut h = Harness::new(SessionRole::Main, Some("h1"));
+        h.send(1, RequestFlags::default());
+        let first = h.flush_calls()[0].0;
+        h.reply(vec![Outgoing::Content(rpc_error(first, 420, "FLOOD_WAIT_5"))]);
+        h.client.send(chained(2, 1), h.now);
+        let calls = h.flush_calls();
+        assert_eq!(calls.len(), 1, "the parked dependency waits out its flood wait");
+        assert_eq!(calls[0].2, 2);
+        assert!(calls[0].1.is_empty(), "sent without invokeAfterMsg");
+        h.reply(vec![Outgoing::Content(rpc_result(calls[0].0, &[0; 4]))]);
+        assert_eq!(completed(&h.events(), 2), (1, false));
+    }
+
+    #[test]
+    fn a_request_carried_to_a_new_session_counts_both_sends() {
+        let mut h = Harness::new(SessionRole::Main, Some("h1"));
+        h.send(1, RequestFlags::default());
+        assert_eq!(h.flush_calls().len(), 1);
+        let pending = h.client.into_pending();
+        let mut next = Harness::new(SessionRole::Main, Some("h1"));
+        for request in pending {
+            next.client.adopt(request, next.now);
+        }
+        let calls = next.flush_calls();
+        assert_eq!(calls.len(), 1);
+        next.reply(vec![Outgoing::Content(rpc_result(calls[0].0, &[0; 4]))]);
+        assert_eq!(completed(&next.events(), 1), (2, false));
+    }
+
+    #[test]
+    fn a_request_carried_before_it_went_out_counts_once() {
+        let mut h = Harness::new(SessionRole::Main, Some("h1"));
+        h.send(1, RequestFlags::default());
+        let pending = h.client.into_pending();
+        let mut next = Harness::new(SessionRole::Main, Some("h1"));
+        for request in pending {
+            next.client.adopt(request, next.now);
+        }
+        let calls = next.flush_calls();
+        assert_eq!(calls.len(), 1);
+        next.reply(vec![Outgoing::Content(rpc_result(calls[0].0, &[0; 4]))]);
+        assert_eq!(completed(&next.events(), 1), (1, false));
+    }
+}
+
 #[path = "coverage_tests.rs"]
 mod coverage;
 

@@ -160,9 +160,10 @@ impl Default for SessionConfig {
     }
 }
 
+/// `Result::chained`: the answered message carried `invokeAfterMsg`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SessionEvent {
-    Result { id: QueryId, body: Vec<u8>, response_msg_id: i64, original_size: usize },
+    Result { id: QueryId, body: Vec<u8>, response_msg_id: i64, original_size: usize, chained: bool },
     Error { id: QueryId, code: i32, message: String, response_msg_id: i64 },
     Acknowledged { id: QueryId },
     Update { body: Vec<u8>, msg_id: i64 },
@@ -431,6 +432,9 @@ pub struct Session {
     unknown_queries: usize,
     pending: VecDeque<QueryId>,
     by_msg_id: HashMap<i64, QueryId>,
+    /// How many msg_ids each query went out under, kept across its answers and cancels until the
+    /// caller takes it (`take_sends`): a query sent again after an error answer goes on counting.
+    sends: HashMap<QueryId, u32>,
     containers: HashMap<i64, Vec<i64>>,
     quick_acks: VecDeque<(u32, Vec<QueryId>, u64)>,
 
@@ -573,6 +577,7 @@ impl Session {
             unknown_queries: 0,
             pending: VecDeque::new(),
             by_msg_id: HashMap::new(),
+            sends: HashMap::new(),
             containers: HashMap::new(),
             quick_acks: VecDeque::new(),
             to_ack: Vec::new(),
@@ -962,6 +967,12 @@ impl Session {
 
     pub fn contains(&self, id: QueryId) -> bool {
         self.queries.contains_key(&id)
+    }
+
+    /// How many msg_ids the query went out under in this session (a retransmit under the same msg_id
+    /// is not counted), forgotten here.
+    pub fn take_sends(&mut self, id: QueryId) -> u32 {
+        self.sends.remove(&id).unwrap_or(0)
     }
 
     /// The query went out at least once, so the server may have it.
@@ -2529,17 +2540,19 @@ impl Session {
         {
             self.note_arrived(seq, now);
         }
+        let chained =
+            self.queries.get(&id).is_some_and(|query| query.msg_id == req_msg_id && query.invoke_after_msg_id != 0);
         let event = match tlm::parse_rpc_result_limited(result, context.budget.min(tlm::MAX_UNPACKED_SIZE)) {
             Ok(RpcResultBody::Error(error)) => {
                 let error = error.normalized();
                 SessionEvent::Error { id, code: error.code, message: error.message, response_msg_id: msg_id }
             }
             Ok(RpcResultBody::Value(value)) => {
-                SessionEvent::Result { id, body: value.to_vec(), response_msg_id: msg_id, original_size: size }
+                SessionEvent::Result { id, body: value.to_vec(), response_msg_id: msg_id, original_size: size, chained }
             }
             Ok(RpcResultBody::PackedValue(value)) => {
                 context.budget = context.budget.saturating_sub(value.len());
-                SessionEvent::Result { id, body: value, response_msg_id: msg_id, original_size: size }
+                SessionEvent::Result { id, body: value, response_msg_id: msg_id, original_size: size, chained }
             }
             Ok(RpcResultBody::DropAnswer(_)) => return,
             Err(error) => {
@@ -3195,6 +3208,7 @@ impl Session {
     pub fn start_bind(&mut self, id: QueryId, request: BindRequest, now: Now) {
         if let Some((previous, _)) = self.bind.take() {
             self.cancel(previous);
+            self.sends.remove(&previous);
         }
         self.cancel(id);
         self.queries.insert(
@@ -3234,6 +3248,7 @@ impl Session {
             return;
         }
         self.bind = None;
+        self.sends.remove(&id);
         if bound {
             self.bind_gate = false;
             if !self.pending.is_empty() || !self.to_retransmit.is_empty() {
@@ -3431,6 +3446,7 @@ impl Session {
                 let seq_no = self.next_seq_no(true);
                 let epoch = self.connection_epoch;
                 let bind_body = self.bind_body(id, msg_id, rng);
+                *self.sends.entry(id).or_insert(0) += 1;
                 let query = self.queries.get_mut(&id).expect("query exists");
                 if let Some(body) = bind_body {
                     query.body = body;

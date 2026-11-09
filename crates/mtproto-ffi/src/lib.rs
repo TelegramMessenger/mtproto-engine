@@ -26,6 +26,11 @@ pub const ABI_VERSION: u32 = 5;
 /// `MTEvent.flags` of `MTEventKindReleased`: the request may have reached the server.
 pub const RELEASED_MAY_HAVE_RUN: u32 = 1 << 0;
 
+/// `MTEvent.flags` of `MTEventKindCompleted`: the request went out under more than one msg_id.
+pub const COMPLETED_SENT_AGAIN: u32 = 1 << 0;
+/// `MTEvent.flags` of `MTEventKindCompleted`: the answered message carried `invokeAfterMsg`.
+pub const COMPLETED_CHAINED: u32 = 1 << 1;
+
 /// `MTEvent.flags` of `MTEventKindAuthKeyCreated`: exactly one is set.
 pub const AUTH_KEY_CREATED_TEMPORARY: u32 = 1 << 0;
 pub const AUTH_KEY_CREATED_PERMANENT: u32 = 1 << 1;
@@ -404,9 +409,11 @@ impl EngineCallbacks for Bridge {
 impl Bridge {
     fn on_rpc_event(&self, session: SessionHandle, event: RpcEvent) {
         match event {
-            RpcEvent::Completed { id, body, response_time, duration } => {
+            RpcEvent::Completed { id, body, response_time, duration, transmissions, chained } => {
                 let mut event = blank(1);
                 event.request_id = id.0;
+                event.flags = (if transmissions > 1 { COMPLETED_SENT_AGAIN } else { 0 })
+                    | (if chained { COMPLETED_CHAINED } else { 0 });
                 event.value1 = response_time;
                 event.value2 = duration;
                 self.emit(session, event, Some(body));
