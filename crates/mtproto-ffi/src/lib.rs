@@ -28,7 +28,9 @@ pub const RELEASED_MAY_HAVE_RUN: u32 = 1 << 0;
 
 /// `MTEvent.flags` of `MTEventKindCompleted`: the request went out under more than one msg_id.
 pub const COMPLETED_SENT_AGAIN: u32 = 1 << 0;
-/// `MTEvent.flags` of `MTEventKindCompleted`: the answered message carried `invokeAfterMsg`.
+/// `MTEvent.flags` of `MTEventKindCompleted`: the answered message carried `invokeAfterMsg`. Its
+/// `integer1` is the answered send's msg_id and `integer2` the msg_id its `invokeAfterMsg` named (0 when
+/// none).
 pub const COMPLETED_CHAINED: u32 = 1 << 1;
 
 /// `MTEvent.flags` of `MTEventKindAuthKeyCreated`: exactly one is set.
@@ -409,11 +411,21 @@ impl EngineCallbacks for Bridge {
 impl Bridge {
     fn on_rpc_event(&self, session: SessionHandle, event: RpcEvent) {
         match event {
-            RpcEvent::Completed { id, body, response_time, duration, transmissions, chained } => {
+            RpcEvent::Completed {
+                id,
+                body,
+                response_time,
+                duration,
+                transmissions,
+                answered_msg_id,
+                chained_to_msg_id,
+            } => {
                 let mut event = blank(1);
                 event.request_id = id.0;
                 event.flags = (if transmissions > 1 { COMPLETED_SENT_AGAIN } else { 0 })
-                    | (if chained { COMPLETED_CHAINED } else { 0 });
+                    | (if chained_to_msg_id != 0 { COMPLETED_CHAINED } else { 0 });
+                event.integer1 = answered_msg_id;
+                event.integer2 = chained_to_msg_id;
                 event.value1 = response_time;
                 event.value2 = duration;
                 self.emit(session, event, Some(body));

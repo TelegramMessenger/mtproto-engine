@@ -107,8 +107,8 @@ impl Harness {
             .send(RpcRequest { id: RequestId(tag as u64), body: call(tag), flags, invoke_after: None }, self.now);
     }
 
-    fn flush_calls(&mut self) -> Vec<(i64, Vec<u32>, u32)> {
-        let mut calls = Vec::new();
+    fn flush_messages(&mut self) -> Vec<ClientMessage> {
+        let mut messages = Vec::new();
         let mut idle = 0;
         for _ in 0..40 {
             self.advance(0.002);
@@ -121,15 +121,33 @@ impl Harness {
                 continue;
             };
             idle = 0;
-            let packet = self.server.decode(&transmit.data);
-            for message in packet.messages {
-                let (wrappers, tag) = unwrap_call(&message.body);
-                if let Some(tag) = tag {
-                    calls.push((message.msg_id, wrappers, tag));
-                }
-            }
+            messages.extend(self.server.decode(&transmit.data).messages);
         }
-        calls
+        messages
+    }
+
+    fn flush_calls(&mut self) -> Vec<(i64, Vec<u32>, u32)> {
+        self.flush_messages()
+            .into_iter()
+            .filter_map(|message| {
+                let (wrappers, tag) = unwrap_call(&message.body);
+                tag.map(|tag| (message.msg_id, wrappers, tag))
+            })
+            .collect()
+    }
+
+    /// The calls sent, each as (msg_id, tag, the msg_id its invokeAfterMsg names or 0).
+    fn flush_chained_calls(&mut self) -> Vec<(i64, u32, i64)> {
+        self.flush_messages()
+            .into_iter()
+            .filter_map(|message| {
+                let (_, tag) = unwrap_call(&message.body);
+                let mut reader = Reader::new(&message.body);
+                let target =
+                    if reader.read_u32().unwrap() == ids::INVOKE_AFTER_MSG { reader.read_i64().unwrap() } else { 0 };
+                tag.map(|tag| (message.msg_id, tag, target))
+            })
+            .collect()
     }
 
     fn reply(&mut self, items: Vec<Outgoing>) {
@@ -1380,15 +1398,27 @@ mod transmissions {
     use super::*;
 
     fn completed(events: &[RpcEvent], id: u64) -> (u32, bool) {
+        let (transmissions, _, chained_to) = completed_ids(events, id);
+        (transmissions, chained_to != 0)
+    }
+
+    /// (transmissions, answered_msg_id, chained_to_msg_id) of the request's Completed.
+    fn completed_ids(events: &[RpcEvent], id: u64) -> (u32, i64, i64) {
         events
             .iter()
             .find_map(|event| match event {
-                RpcEvent::Completed { id: done, transmissions, chained, .. } if done.0 == id => {
-                    Some((*transmissions, *chained))
+                RpcEvent::Completed { id: done, transmissions, answered_msg_id, chained_to_msg_id, .. }
+                    if done.0 == id =>
+                {
+                    Some((*transmissions, *answered_msg_id, *chained_to_msg_id))
                 }
                 _ => None,
             })
             .expect("completed")
+    }
+
+    fn sent(calls: &[(i64, u32, i64)], tag: u32) -> (i64, i64) {
+        calls.iter().find(|c| c.1 == tag).map(|c| (c.0, c.2)).expect("sent")
     }
 
     fn chained(id: u64, after: u64) -> RpcRequest {
@@ -1482,6 +1512,75 @@ mod transmissions {
         assert!(calls[0].1.is_empty(), "sent without invokeAfterMsg");
         h.reply(vec![Outgoing::Content(rpc_result(calls[0].0, &[0; 4]))]);
         assert_eq!(completed(&h.events(), 2), (1, false));
+    }
+
+    #[test]
+    fn completed_names_the_answered_msg_id_and_the_one_it_was_chained_to() {
+        let mut h = Harness::new(SessionRole::Main, Some("h1"));
+        h.send(1, RequestFlags::default());
+        h.client.send(chained(2, 1), h.now);
+        let calls = h.flush_chained_calls();
+        let (first, first_target) = sent(&calls, 1);
+        let (dependent, dependent_target) = sent(&calls, 2);
+        assert_eq!(first_target, 0);
+        assert_eq!(dependent_target, first, "the wire names the dependency's msg_id");
+        h.reply(vec![Outgoing::Content(rpc_result(first, &[0; 4])), Outgoing::Content(rpc_result(dependent, &[0; 4]))]);
+        let events = h.events();
+        assert_eq!(completed_ids(&events, 1), (1, first, 0));
+        assert_eq!(completed_ids(&events, 2), (1, dependent, first));
+    }
+
+    #[test]
+    fn both_sent_again_chain_the_dependent_to_the_dependency_new_msg_id() {
+        let mut h = Harness::new(SessionRole::Main, Some("h1"));
+        h.send(1, RequestFlags::default());
+        h.client.send(chained(2, 1), h.now);
+        let calls = h.flush_chained_calls();
+        let (first, _) = sent(&calls, 1);
+        let (dependent, _) = sent(&calls, 2);
+        h.reply(vec![
+            Outgoing::Service(bad_server_salt(first, 1, 6)),
+            Outgoing::Service(bad_server_salt(dependent, 1, 6)),
+        ]);
+        h.server.salt = 6;
+        let again = h.flush_chained_calls();
+        let (first_again, _) = sent(&again, 1);
+        let (dependent_again, target_again) = sent(&again, 2);
+        assert_ne!(first_again, first, "goes again under a new msg_id");
+        assert_eq!(target_again, first_again, "chained to the dependency's new msg_id");
+        h.reply(vec![
+            Outgoing::Content(rpc_result(first_again, &[0; 4])),
+            Outgoing::Content(rpc_result(dependent_again, &[0; 4])),
+        ]);
+        let events = h.events();
+        let (_, answered, _) = completed_ids(&events, 1);
+        assert_eq!(completed_ids(&events, 2), (2, dependent_again, answered), "chained to the send that answered");
+    }
+
+    #[test]
+    fn a_dependency_sent_again_alone_leaves_the_dependent_chained_to_its_first_msg_id() {
+        let mut h = Harness::new(SessionRole::Main, Some("h1"));
+        h.send(1, RequestFlags::default());
+        h.client.send(chained(2, 1), h.now);
+        let calls = h.flush_chained_calls();
+        let (first, _) = sent(&calls, 1);
+        let (dependent, _) = sent(&calls, 2);
+        h.reply(vec![
+            Outgoing::Service(bad_server_salt(first, 1, 6)),
+            Outgoing::Content(rpc_result(dependent, &[0; 4])),
+        ]);
+        h.server.salt = 6;
+        let again = h.flush_chained_calls();
+        assert_eq!(again.len(), 1, "only the dependency goes again");
+        let (first_again, _) = sent(&again, 1);
+        h.reply(vec![Outgoing::Content(rpc_result(first_again, &[0; 4]))]);
+        let events = h.events();
+        assert_eq!(completed_ids(&events, 1), (2, first_again, 0));
+        assert_eq!(
+            completed_ids(&events, 2),
+            (1, dependent, first),
+            "names the dependency's first msg_id, not the one that answered"
+        );
     }
 
     #[test]

@@ -160,10 +160,11 @@ impl Default for SessionConfig {
     }
 }
 
-/// `Result::chained`: the answered message carried `invokeAfterMsg`.
+/// `Result::req_msg_id`: the msg_id the answer names, the send that ran. `Result::chained_to`: the msg_id
+/// that send's `invokeAfterMsg` named, 0 when it carried none (or the answer names an earlier send).
 #[derive(Debug, Clone, PartialEq)]
 pub enum SessionEvent {
-    Result { id: QueryId, body: Vec<u8>, response_msg_id: i64, original_size: usize, chained: bool },
+    Result { id: QueryId, body: Vec<u8>, response_msg_id: i64, original_size: usize, req_msg_id: i64, chained_to: i64 },
     Error { id: QueryId, code: i32, message: String, response_msg_id: i64 },
     Acknowledged { id: QueryId },
     Update { body: Vec<u8>, msg_id: i64 },
@@ -2540,19 +2541,34 @@ impl Session {
         {
             self.note_arrived(seq, now);
         }
-        let chained =
-            self.queries.get(&id).is_some_and(|query| query.msg_id == req_msg_id && query.invoke_after_msg_id != 0);
+        let chained_to = self
+            .queries
+            .get(&id)
+            .filter(|query| query.msg_id == req_msg_id)
+            .map_or(0, |query| query.invoke_after_msg_id);
         let event = match tlm::parse_rpc_result_limited(result, context.budget.min(tlm::MAX_UNPACKED_SIZE)) {
             Ok(RpcResultBody::Error(error)) => {
                 let error = error.normalized();
                 SessionEvent::Error { id, code: error.code, message: error.message, response_msg_id: msg_id }
             }
-            Ok(RpcResultBody::Value(value)) => {
-                SessionEvent::Result { id, body: value.to_vec(), response_msg_id: msg_id, original_size: size, chained }
-            }
+            Ok(RpcResultBody::Value(value)) => SessionEvent::Result {
+                id,
+                body: value.to_vec(),
+                response_msg_id: msg_id,
+                original_size: size,
+                req_msg_id,
+                chained_to,
+            },
             Ok(RpcResultBody::PackedValue(value)) => {
                 context.budget = context.budget.saturating_sub(value.len());
-                SessionEvent::Result { id, body: value, response_msg_id: msg_id, original_size: size, chained }
+                SessionEvent::Result {
+                    id,
+                    body: value,
+                    response_msg_id: msg_id,
+                    original_size: size,
+                    req_msg_id,
+                    chained_to,
+                }
             }
             Ok(RpcResultBody::DropAnswer(_)) => return,
             Err(error) => {

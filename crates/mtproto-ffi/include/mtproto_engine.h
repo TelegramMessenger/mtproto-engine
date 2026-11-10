@@ -219,7 +219,8 @@ enum {
 
 /* MTEventKindCompleted's flags: MTCompletedSentAgain when the request went out under more than one
    msg_id (a retransmit under the same msg_id is one), MTCompletedChained when the answered message
-   carried invokeAfterMsg. */
+   carried invokeAfterMsg. Its integer1 is the msg_id of the send the answer is for, integer2 the msg_id
+   that send's invokeAfterMsg named (0 when none): the server ran the request after that execution. */
 enum {
     MTCompletedSentAgain = 1 << 0,
     MTCompletedChained = 1 << 1,

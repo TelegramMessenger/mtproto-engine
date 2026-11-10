@@ -1,5 +1,6 @@
 //! `MTEventKindCompleted`'s flags through the C ABI (M8b's E-1): `MTCompletedChained` when the answered message
-//! carried `invokeAfterMsg`, `MTCompletedSentAgain` when the request went out under more than one msg_id.
+//! carried `invokeAfterMsg`, `MTCompletedSentAgain` when the request went out under more than one msg_id; `integer1`
+//! the answered send's msg_id, `integer2` the msg_id its `invokeAfterMsg` named.
 
 use std::ffi::c_void;
 use std::sync::{Condvar, Mutex};
@@ -13,6 +14,8 @@ struct Seen {
     kind: u32,
     request: u64,
     flags: u32,
+    integer1: i64,
+    integer2: i64,
 }
 
 #[derive(Default)]
@@ -27,7 +30,13 @@ unsafe extern "C" fn on_event(context: *mut c_void, _session: u64, event: *const
     if !event.payload.is_null() {
         unsafe { mt_buffer_free(event.payload) };
     }
-    sink.events.lock().unwrap().push(Seen { kind: event.kind, request: event.request_id, flags: event.flags });
+    sink.events.lock().unwrap().push(Seen {
+        kind: event.kind,
+        request: event.request_id,
+        flags: event.flags,
+        integer1: event.integer1,
+        integer2: event.integer2,
+    });
     sink.condvar.notify_all();
 }
 
@@ -117,9 +126,13 @@ fn a_dependent_completes_chained_and_its_dependency_does_not() {
         [first, second].iter().all(|id| events.iter().any(|e| e.kind == KIND_COMPLETED && e.request == *id))
     }));
     let events = sink.events.lock().unwrap().clone();
-    let completed = |id: u64| events.iter().find(|e| e.kind == KIND_COMPLETED && e.request == id).unwrap().flags;
-    assert_eq!(completed(first), 0, "went out once, not chained");
-    assert_eq!(completed(second), COMPLETED_CHAINED, "went out once, chained to the first");
+    let completed = |id: u64| *events.iter().find(|e| e.kind == KIND_COMPLETED && e.request == id).unwrap();
+    assert_eq!(completed(first).flags, 0, "went out once, not chained");
+    assert_eq!(completed(second).flags, COMPLETED_CHAINED, "went out once, chained to the first");
+    assert_ne!(completed(first).integer1, 0, "the first's answered msg_id");
+    assert_eq!(completed(first).integer2, 0, "the first names no msg_id");
+    assert_ne!(completed(second).integer1, completed(first).integer1);
+    assert_eq!(completed(second).integer2, completed(first).integer1, "the second names the first's answered msg_id");
     unsafe { mt_session_destroy(engine, session) };
     unsafe { mt_engine_destroy(engine) };
 }

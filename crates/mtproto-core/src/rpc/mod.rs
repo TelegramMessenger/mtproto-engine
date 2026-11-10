@@ -101,9 +101,13 @@ pub enum RpcEvent {
         /// The msg_ids the request went out under, over every session of this client and those it was
         /// carried from (`adopt`); a retransmit under the same msg_id is not counted.
         transmissions: u32,
-        /// The answered message carried `invokeAfterMsg` (the request has `invoke_after` and its
-        /// dependency was in the session when it went).
-        chained: bool,
+        /// The msg_id of the send the answer is for: the execution whose result `body` is.
+        answered_msg_id: i64,
+        /// The msg_id that send's `invokeAfterMsg` named (the request has `invoke_after` and its
+        /// dependency was in the session when it went), 0 when it carried none. The server ran the
+        /// request after the execution of that msg_id, which is the dependency's answered one only when
+        /// the two are equal.
+        chained_to_msg_id: i64,
     },
     Failed {
         id: RequestId,
@@ -793,7 +797,7 @@ impl RpcClient {
                 self.session.finish_bind(id, false, now);
                 self.events.push_back(RpcEvent::TemporaryKeyBindFailed { code, message });
             }
-            SessionEvent::Result { id, body, response_msg_id, chained, .. } => {
+            SessionEvent::Result { id, body, response_msg_id, req_msg_id, chained_to, .. } => {
                 let id = RequestId::from(id);
                 if let Some(state) = self.finish(id) {
                     if state.init_generation == Some(self.init_generation)
@@ -809,7 +813,8 @@ impl RpcClient {
                         response_time: msg_id_time(response_msg_id),
                         duration: (now.unix - state.sent_at_unix).max(0.0),
                         transmissions: state.sends,
-                        chained,
+                        answered_msg_id: req_msg_id,
+                        chained_to_msg_id: chained_to,
                     });
                 }
             }
