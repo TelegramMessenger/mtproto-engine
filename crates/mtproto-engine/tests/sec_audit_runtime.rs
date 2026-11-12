@@ -229,14 +229,9 @@ fn injected_frames_never_touch_the_key_clock_or_salts() {
     assert!(protocol_drops >= 1);
 }
 
-#[allow(unsafe_code)]
-fn process_cpu_seconds() -> f64 {
-    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
-    unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
-    let user = usage.ru_utime.tv_sec as f64 + usage.ru_utime.tv_usec as f64 * 1e-6;
-    let system = usage.ru_stime.tv_sec as f64 + usage.ru_stime.tv_usec as f64 * 1e-6;
-    user + system
-}
+#[path = "support/cpu.rs"]
+mod cpu;
+use cpu::cpu_seconds as process_cpu_seconds;
 
 /// An on-path attacker floods a working connection with forged quick acks (4 bytes each, 31 bits of
 /// guessed token): they cost little CPU, never count as liveness, and the session keeps working.

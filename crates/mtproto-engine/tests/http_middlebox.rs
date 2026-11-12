@@ -42,13 +42,9 @@ impl EngineCallbacks for Collector {
     }
 }
 
-#[allow(unsafe_code)]
-fn cpu_seconds() -> f64 {
-    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
-    unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
-    let tv = |t: libc::timeval| t.tv_sec as f64 + t.tv_usec as f64 * 1e-6;
-    tv(usage.ru_utime) + tv(usage.ru_stime)
-}
+#[path = "support/cpu.rs"]
+mod cpu;
+use cpu::cpu_seconds;
 
 impl Collector {
     fn wait<F: Fn(&[(SessionHandle, EngineEvent)]) -> bool>(&self, timeout: Duration, predicate: F) -> bool {

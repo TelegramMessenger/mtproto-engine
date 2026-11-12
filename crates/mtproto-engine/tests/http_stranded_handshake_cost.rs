@@ -1,5 +1,4 @@
 //! Review round 8: own binary, so the process's CPU time measures nothing but this engine.
-#![allow(unsafe_code)]
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -32,12 +31,9 @@ impl EngineCallbacks for Collector {
     }
 }
 
-fn cpu_seconds() -> f64 {
-    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
-    unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
-    let seconds = |time: libc::timeval| time.tv_sec as f64 + time.tv_usec as f64 / 1e6;
-    seconds(usage.ru_utime) + seconds(usage.ru_stime)
-}
+#[path = "support/cpu.rs"]
+mod cpu;
+use cpu::cpu_seconds;
 
 fn read_message(stream: &mut TcpStream, buffer: &mut Vec<u8>) -> Option<Vec<u8>> {
     let mut scratch = vec![0u8; 65536];

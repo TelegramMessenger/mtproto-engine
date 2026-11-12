@@ -365,6 +365,12 @@ impl Connection {
         Ok(())
     }
 
+    /// Asks for the socket's events again after a read that stopped short of `WouldBlock`: mio promises
+    /// no further readable event otherwise, and on Windows there is none.
+    pub fn rearm(&mut self, registry: &Registry) -> Result<(), ConnectionError> {
+        self.pipe.set_writable_interest(registry, self.token, self.writable_interest).map_err(ConnectionError::Io)
+    }
+
     pub fn acknowledged_bytes(&self) -> Option<u64> {
         self.pipe.send_queue().map(|queued| self.written_total.saturating_sub(queued as u64))
     }

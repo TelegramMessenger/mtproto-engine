@@ -2,6 +2,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use mtproto_core::session::Now;
 
+#[cfg(unix)]
 #[allow(unsafe_code)]
 pub fn monotonic_seconds() -> f64 {
     let mut spec = libc::timespec { tv_sec: 0, tv_nsec: 0 };
@@ -10,6 +11,14 @@ pub fn monotonic_seconds() -> f64 {
         return std::time::Instant::now().elapsed().as_secs_f64();
     }
     spec.tv_sec as f64 + spec.tv_nsec as f64 * 1e-9
+}
+
+/// `Instant` has no absolute value, so this counts from a day before the first call: timestamps left
+/// at 0.0 are then long past, as they are against the time since boot that Unix reports.
+#[cfg(not(unix))]
+pub fn monotonic_seconds() -> f64 {
+    static BASE: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    86_400.0 + BASE.get_or_init(std::time::Instant::now).elapsed().as_secs_f64()
 }
 
 pub fn unix_seconds() -> f64 {

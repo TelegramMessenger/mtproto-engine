@@ -2,7 +2,6 @@
 
 use std::io::{ErrorKind, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
-use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, SyncSender, channel, sync_channel};
 use std::sync::{Arc, Mutex};
@@ -532,16 +531,7 @@ impl ConnectionControl {
             return;
         }
         for stream in [&self.client, &self.upstream] {
-            let linger = libc::linger { l_onoff: 1, l_linger: 0 };
-            unsafe {
-                libc::setsockopt(
-                    stream.as_raw_fd(),
-                    libc::SOL_SOCKET,
-                    libc::SO_LINGER,
-                    &linger as *const libc::linger as *const libc::c_void,
-                    std::mem::size_of::<libc::linger>() as libc::socklen_t,
-                );
-            }
+            reset_on_close(stream);
             let _ = stream.shutdown(Shutdown::Both);
         }
     }
@@ -807,17 +797,61 @@ fn socks5_accept(client: &mut TcpStream) -> Option<SocketAddr> {
     Some(target)
 }
 
-fn set_receive_buffer(socket: &impl AsRawFd, bytes: usize) {
-    let value = bytes.min(i32::MAX as usize) as libc::c_int;
-    unsafe {
-        libc::setsockopt(
-            socket.as_raw_fd(),
-            libc::SOL_SOCKET,
-            libc::SO_RCVBUF,
-            &value as *const libc::c_int as *const libc::c_void,
-            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-        );
+/// Socket-level `setsockopt`. Unix and WinSock differ in the handle, the option values and `linger`.
+#[cfg(unix)]
+mod sockopt {
+    pub use libc::{SO_LINGER, SO_RCVBUF, linger as Linger};
+    pub use std::os::fd::AsRawFd as Socket;
+
+    pub fn set<T>(socket: &impl Socket, name: libc::c_int, value: &T) {
+        unsafe {
+            libc::setsockopt(
+                socket.as_raw_fd(),
+                libc::SOL_SOCKET,
+                name,
+                (value as *const T).cast(),
+                std::mem::size_of::<T>() as libc::socklen_t,
+            );
+        }
     }
+}
+
+#[cfg(windows)]
+mod sockopt {
+    pub use std::os::windows::io::AsRawSocket as Socket;
+
+    // winsock2.h; the libc crate declares `setsockopt` for Windows but none of these.
+    const SOL_SOCKET: libc::c_int = 0xffff;
+    pub const SO_LINGER: libc::c_int = 0x0080;
+    pub const SO_RCVBUF: libc::c_int = 0x1002;
+
+    #[repr(C)]
+    pub struct Linger {
+        pub l_onoff: u16,
+        pub l_linger: u16,
+    }
+
+    pub fn set<T>(socket: &impl Socket, name: libc::c_int, value: &T) {
+        unsafe {
+            libc::setsockopt(
+                socket.as_raw_socket() as libc::SOCKET,
+                SOL_SOCKET,
+                name,
+                (value as *const T).cast(),
+                std::mem::size_of::<T>() as libc::c_int,
+            );
+        }
+    }
+}
+
+/// Closing the socket then resets the connection.
+fn reset_on_close(stream: &TcpStream) {
+    sockopt::set(stream, sockopt::SO_LINGER, &sockopt::Linger { l_onoff: 1, l_linger: 0 });
+}
+
+fn set_receive_buffer(socket: &impl sockopt::Socket, bytes: usize) {
+    let value = bytes.min(i32::MAX as usize) as libc::c_int;
+    sockopt::set(socket, sockopt::SO_RCVBUF, &value);
 }
 
 /// The client closed the connection while it was being set up, without sending anything.
@@ -843,16 +877,7 @@ fn handle_connection(mut client: TcpStream, upstream: Upstream, shared: Arc<Shar
     let outage = shared.outage_until.lock().unwrap().is_some_and(|until| Instant::now() < until);
     if outage || random.unit() < profile.refuse_probability {
         shared.refused.fetch_add(1, Ordering::Relaxed);
-        let linger = libc::linger { l_onoff: 1, l_linger: 0 };
-        unsafe {
-            libc::setsockopt(
-                client.as_raw_fd(),
-                libc::SOL_SOCKET,
-                libc::SO_LINGER,
-                &linger as *const libc::linger as *const libc::c_void,
-                std::mem::size_of::<libc::linger>() as libc::socklen_t,
-            );
-        }
+        reset_on_close(&client);
         return;
     }
     let target = match upstream {
@@ -1196,6 +1221,30 @@ mod tests {
         assert!(started.elapsed() >= Duration::from_millis(100));
     }
 
+    /// Bytes the sender's kernel took and still holds.
+    #[cfg(target_vendor = "apple")]
+    fn unsent_bytes(stream: &TcpStream) -> usize {
+        use std::os::fd::AsRawFd;
+        let mut unsent: libc::c_int = 0;
+        let mut length = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        unsafe {
+            libc::getsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_NWRITE,
+                (&mut unsent as *mut libc::c_int).cast(),
+                &mut length,
+            );
+        }
+        unsent as usize
+    }
+
+    /// Unknown without `SO_NWRITE`: everything the kernel took then counts as consumed.
+    #[cfg(not(target_vendor = "apple"))]
+    fn unsent_bytes(_stream: &TcpStream) -> usize {
+        0
+    }
+
     #[test]
     fn queue_limit_pushes_back_on_the_sender() {
         let upstream = echo_server();
@@ -1212,18 +1261,7 @@ mod tests {
                 Err(error) => panic!("{error}"),
             }
         }
-        let mut unsent: libc::c_int = 0;
-        let mut length = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
-        unsafe {
-            libc::getsockopt(
-                stream.as_raw_fd(),
-                libc::SOL_SOCKET,
-                libc::SO_NWRITE,
-                (&mut unsent as *mut libc::c_int).cast(),
-                &mut length,
-            );
-        }
-        let consumed = accepted - unsent as usize;
+        let consumed = accepted - unsent_bytes(&stream);
         assert!(consumed < 1024 * 1024, "the relay consumed {consumed} bytes of a 30 KB/s link in 0.5 s");
     }
 

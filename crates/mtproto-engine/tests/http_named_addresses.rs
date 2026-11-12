@@ -1,4 +1,6 @@
 //! Review round 8: a name whose first address is unreachable.
+// Unix only: Windows refuses connections to a full accept queue instead of dropping them.
+#![cfg(unix)]
 #![allow(unsafe_code)]
 
 use std::collections::HashMap;

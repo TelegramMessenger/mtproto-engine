@@ -1488,9 +1488,11 @@ impl SessionRuntime {
         reason: Option<DropReason>,
     ) {
         self.racer_check = None;
-        let Some(winner) = self.racer.take() else {
+        let Some(mut winner) = self.racer.take() else {
             return;
         };
+        // A checked racer stopped reading at the answer to its check.
+        let _ = winner.rearm(registry);
         if let Some(reason) = reason {
             self.report_drop(reason, now, callbacks);
         }
