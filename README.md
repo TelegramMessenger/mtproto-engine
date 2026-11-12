@@ -75,6 +75,11 @@ instructions (`aes_armv8`) and `mtproto-core` enables the hardware SHA-256 backe
 without them crypto runs about 15x slower. macOS packaging: `core-xprojects/mtproto-engine` in the
 Telegram-Mac repo builds `MTProtoEngineFFI.xcframework` (arm64 + x86_64, macOS 10.13).
 
+Windows (`x86_64-pc-windows-msvc`): build and test with `--workspace --exclude mtproto-bench`, the
+benchmark tool is Unix only. Two things the engine reads from the system on Apple platforms are not read
+there: interface names, so no connection counts as cellular, and the kernel's send queue, so a connection
+that died silently is noticed by the read timeout instead of the faster probe.
+
 ## Testing
 
 - Unit and property tests in every module of `mtproto-core` (crypto vectors, TL, framing, every

@@ -1,8 +1,11 @@
-use std::ffi::CStr;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::IpAddr;
 
+#[cfg(unix)]
 #[allow(unsafe_code)]
 pub fn interface_name_for(address: IpAddr) -> Option<String> {
+    use std::ffi::CStr;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
     let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
     if unsafe { libc::getifaddrs(&mut list) } != 0 {
         return None;
@@ -36,6 +39,12 @@ pub fn interface_name_for(address: IpAddr) -> Option<String> {
     found
 }
 
+/// Interface names are not looked up here, so no connection counts as cellular.
+#[cfg(not(unix))]
+pub fn interface_name_for(_address: IpAddr) -> Option<String> {
+    None
+}
+
 pub fn is_cellular_interface(name: &str) -> bool {
     name.starts_with("pdp_ip")
 }
@@ -44,9 +53,14 @@ pub fn is_cellular_interface(name: &str) -> bool {
 mod tests {
     use super::*;
 
+    #[cfg(target_vendor = "apple")]
     #[test]
     fn loopback_resolves_to_lo0() {
-        assert_eq!(interface_name_for(IpAddr::V4(Ipv4Addr::LOCALHOST)).as_deref(), Some("lo0"));
+        assert_eq!(interface_name_for(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)).as_deref(), Some("lo0"));
+    }
+
+    #[test]
+    fn only_pdp_ip_interfaces_are_cellular() {
         assert!(!is_cellular_interface("lo0"));
         assert!(is_cellular_interface("pdp_ip0"));
     }

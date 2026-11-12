@@ -1,5 +1,4 @@
 //! Review round 7: its own binary, so the process's CPU time measures nothing but this engine.
-#![allow(unsafe_code)]
 
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -31,12 +30,9 @@ impl EngineCallbacks for Collector {
     }
 }
 
-fn cpu_seconds() -> f64 {
-    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
-    unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
-    let seconds = |time: libc::timeval| time.tv_sec as f64 + time.tv_usec as f64 / 1e6;
-    seconds(usage.ru_utime) + seconds(usage.ru_stime)
-}
+#[path = "support/cpu.rs"]
+mod cpu;
+use cpu::cpu_seconds;
 
 /// The server's RSA key is not among the client's (an outdated key list, a test DC given prod keys):
 /// every res_pq fails the handshake. Counts failed key creations in 5 s.

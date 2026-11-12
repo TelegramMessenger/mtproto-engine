@@ -347,8 +347,11 @@ fn replayed_server_packets_never_make_a_fake_datacenter_look_answered() {
     assert!(attacker.recorded() > 0);
     let cut = collector.len();
     attacker.switch(Mode::ReplayThenForge(0));
+    // The honest connection's drop and the address result that follows it both come before the cut.
     assert!(collector.wait(WAIT, |events| {
-        events[cut..].iter().any(|(_, event)| matches!(event, EngineEvent::ConnectionDropped { .. }))
+        let mut dropped =
+            events[cut..].iter().skip_while(|(_, event)| !matches!(event, EngineEvent::ConnectionDropped { .. }));
+        dropped.any(|(_, event)| matches!(event, EngineEvent::AddressResult { .. }))
     }));
     let before = collector.len();
     engine.send(session, request(2, 2));

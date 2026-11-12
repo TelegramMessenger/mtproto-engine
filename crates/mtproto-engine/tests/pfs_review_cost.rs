@@ -1,5 +1,4 @@
 //! Its own test binary, so that the process's CPU time measures nothing but the engine under test.
-#![allow(unsafe_code)]
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,12 +23,9 @@ impl EngineCallbacks for Quiet {
     }
 }
 
-fn cpu_seconds() -> f64 {
-    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
-    unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
-    let seconds = |time: libc::timeval| time.tv_sec as f64 + time.tv_usec as f64 / 1e6;
-    seconds(usage.ru_utime) + seconds(usage.ru_stime)
-}
+#[path = "support/cpu.rs"]
+mod cpu;
+use cpu::cpu_seconds;
 
 fn measure(seconds: f64) -> f64 {
     let started = cpu_seconds();

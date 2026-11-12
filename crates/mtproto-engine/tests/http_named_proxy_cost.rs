@@ -1,6 +1,5 @@
 //! Its own test binary, so that the process's CPU time measures nothing but this engine.
 #![allow(dead_code)]
-#![allow(unsafe_code)]
 
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -91,12 +90,9 @@ fn engine(collector: &Arc<Collector>) -> Engine {
     Engine::new(EngineConfig { worker_threads: 1, ..EngineConfig::default() }, collector.clone()).unwrap()
 }
 
-fn cpu_seconds() -> f64 {
-    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
-    unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
-    let seconds = |time: libc::timeval| time.tv_sec as f64 + time.tv_usec as f64 / 1e6;
-    seconds(usage.ru_utime) + seconds(usage.ru_stime)
-}
+#[path = "support/cpu.rs"]
+mod cpu;
+use cpu::cpu_seconds;
 
 fn proxy_named(server: &TestServer, host: &str) -> ProxyConfig {
     ProxyConfig::Http { host: host.into(), port: server.address.port(), username: None, password: None }

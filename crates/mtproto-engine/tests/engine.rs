@@ -919,14 +919,9 @@ fn verified_race_leaves_an_address_that_accepts_but_never_answers() {
     drop(keeper);
 }
 
-#[allow(unsafe_code)]
-fn process_cpu_seconds() -> f64 {
-    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
-    unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
-    let user = usage.ru_utime.tv_sec as f64 + usage.ru_utime.tv_usec as f64 * 1e-6;
-    let system = usage.ru_stime.tv_sec as f64 + usage.ru_stime.tv_usec as f64 * 1e-6;
-    user + system
-}
+#[path = "support/cpu.rs"]
+mod cpu;
+use cpu::cpu_seconds as process_cpu_seconds;
 
 #[test]
 fn unresolvable_proxy_host_backs_off_instead_of_spinning() {
@@ -1435,6 +1430,7 @@ fn steady_calls(engine: &Engine, collector: &Collector, session: SessionHandle, 
 }
 
 #[test]
+#[cfg_attr(not(target_vendor = "apple"), ignore = "needs the kernel's send queue (SO_NWRITE)")]
 fn a_connection_that_falls_silent_in_a_tunnel_is_kept_and_resumes() {
     let key = random_key(82);
     let server = TestServer::start(vec![key.clone()], ServerOptions::default());
@@ -1460,6 +1456,7 @@ fn a_connection_that_falls_silent_in_a_tunnel_is_kept_and_resumes() {
 }
 
 #[test]
+#[cfg_attr(not(target_vendor = "apple"), ignore = "needs the kernel's send queue (SO_NWRITE)")]
 fn a_dead_connection_loses_the_race_to_a_fresh_one() {
     let key = random_key(83);
     let server = TestServer::start(vec![key.clone()], ServerOptions::default());
@@ -1517,6 +1514,7 @@ fn a_racer_that_answers_first_waits_for_a_primary_that_is_only_slow() {
 }
 
 #[test]
+#[cfg_attr(not(target_vendor = "apple"), ignore = "needs the kernel's send queue (SO_NWRITE)")]
 fn a_waiting_racer_takes_over_when_the_silent_primary_is_given_up() {
     let key = random_key(45);
     let server = TestServer::start(vec![key.clone()], ServerOptions::default());
@@ -1588,6 +1586,7 @@ fn call_after_a_blackhole(alternate: &str) -> f64 {
 }
 
 #[test]
+#[cfg_attr(not(target_vendor = "apple"), ignore = "needs the kernel's send queue (SO_NWRITE)")]
 fn a_silent_connection_is_replaced_on_its_own_address_when_the_others_are_dead() {
     for alternate in ["192.0.2.1", "2001:db8::1"] {
         let took = call_after_a_blackhole(alternate);

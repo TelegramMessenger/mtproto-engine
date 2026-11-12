@@ -39,16 +39,36 @@ pub fn only_threads(filter: fn() -> bool) {
     let _ = THREAD_FILTER.set(filter);
 }
 
+#[cfg(unix)]
 unsafe extern "C" {
     fn pthread_self() -> usize;
     fn pthread_getname_np(thread: usize, name: *mut core::ffi::c_char, length: usize) -> core::ffi::c_int;
 }
 
 /// The engine names its threads `mtproto-main`, `mtproto-worker-N` and `mtproto-resolver`.
+#[cfg(unix)]
 pub fn is_engine_thread() -> bool {
     let mut name = [0 as core::ffi::c_char; 64];
     let read = unsafe { pthread_getname_np(pthread_self(), name.as_mut_ptr(), name.len()) };
     read == 0 && name[..8].iter().map(|byte| *byte as u8).eq(*b"mtproto-")
+}
+
+#[cfg(windows)]
+pub fn is_engine_thread() -> bool {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetCurrentThread() -> *mut core::ffi::c_void;
+        fn GetThreadDescription(thread: *mut core::ffi::c_void, description: *mut *mut u16) -> i32;
+        fn LocalFree(memory: *mut core::ffi::c_void) -> *mut core::ffi::c_void;
+    }
+    let mut name = core::ptr::null_mut();
+    if unsafe { GetThreadDescription(GetCurrentThread(), &mut name) } < 0 {
+        return false;
+    }
+    // The name ends with a NUL, which stops the comparison within a shorter one.
+    let engine = b"mtproto-".iter().enumerate().all(|(index, byte)| unsafe { *name.add(index) } == u16::from(*byte));
+    unsafe { LocalFree(name.cast()) };
+    engine
 }
 
 unsafe fn scan(pointer: *const u8, length: usize) {
@@ -72,6 +92,12 @@ unsafe fn scan(pointer: *const u8, length: usize) {
     }
 }
 
+/// A scanned block goes back empty: the system may hand it as it is to a watched thread, which would
+/// then answer for what an unwatched one left in it.
+unsafe fn wipe(pointer: *mut u8, length: usize) {
+    unsafe { core::ptr::write_bytes(pointer, 0, length) };
+}
+
 unsafe impl GlobalAlloc for FreedMemoryScanner {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         unsafe { System.alloc(layout) }
@@ -84,6 +110,7 @@ unsafe impl GlobalAlloc for FreedMemoryScanner {
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
         unsafe {
             scan(pointer, layout.size());
+            wipe(pointer, layout.size());
             System.dealloc(pointer, layout);
         }
     }
@@ -94,6 +121,7 @@ unsafe impl GlobalAlloc for FreedMemoryScanner {
             if !moved.is_null() {
                 core::ptr::copy_nonoverlapping(pointer, moved, layout.size().min(new_size));
                 scan(pointer, layout.size());
+                wipe(pointer, layout.size());
                 System.dealloc(pointer, layout);
             }
             moved

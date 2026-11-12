@@ -1,4 +1,4 @@
-#![allow(dead_code, unsafe_code)]
+#![allow(dead_code)]
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Condvar, Mutex};
@@ -153,13 +153,6 @@ pub fn tagged(id: u64, tag: u32) -> RpcRequest {
 
 pub fn engine(collector: &Arc<Collector>) -> Engine {
     Engine::new(EngineConfig { worker_threads: 1, ..EngineConfig::default() }, collector.clone()).unwrap()
-}
-
-pub fn cpu_seconds() -> f64 {
-    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
-    unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
-    let seconds = |time: libc::timeval| time.tv_sec as f64 + time.tv_usec as f64 / 1e6;
-    seconds(usage.ru_utime) + seconds(usage.ru_stime)
 }
 
 /// The route memory the engine stores, for one network known to block TCP since `at`.
